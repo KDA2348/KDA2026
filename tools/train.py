@@ -1,0 +1,171 @@
+import sys
+import os
+import argparse
+import torch
+import time
+from torch.backends import cudnn
+
+cudnn.benchmark = True
+
+# Add the project root to sys.path
+root_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+sys.path.insert(0, root_path)
+
+from mdistiller.models import cifar_model_dict, imagenet_model_dict
+from mdistiller.distillers import distiller_dict
+from mdistiller.dataset import get_dataset, get_dataset_strong
+from mdistiller.engine.utils import load_checkpoint, log_msg
+from mdistiller.engine.cfg import CFG as cfg
+from mdistiller.engine.cfg import show_cfg
+from mdistiller.engine import trainer_dict
+
+
+def main(cfg, resume, opts):
+    experiment_name = cfg.EXPERIMENT.NAME
+    if experiment_name == "":
+        experiment_name = cfg.EXPERIMENT.TAG
+    tags = cfg.EXPERIMENT.TAG.split(",")
+    if opts:
+        addtional_tags = ["{}:{}".format(k, v) for k, v in zip(opts[::2], opts[1::2])]
+        tags += addtional_tags
+        experiment_name += ",".join(addtional_tags)
+    experiment_name = os.path.join(cfg.EXPERIMENT.PROJECT, experiment_name)
+    if cfg.LOG.WANDB:
+        try:
+            import wandb
+
+            wandb.init(project=cfg.EXPERIMENT.PROJECT, name=experiment_name, tags=tags)
+        except:
+            print(log_msg("Failed to use WANDB", "INFO"))
+            cfg.LOG.WANDB = False
+
+    # cfg & loggers
+    show_cfg(cfg)
+    # init dataloader & models
+    if cfg.DISTILLER.TYPE == 'MLKD':
+        train_loader, val_loader, num_data, num_classes = get_dataset_strong(cfg)
+    else:
+        train_loader, val_loader, num_data, num_classes = get_dataset(cfg)
+    # vanilla
+    if cfg.DISTILLER.TYPE == "NONE":
+        if cfg.DATASET.TYPE == "imagenet":
+            model_student = imagenet_model_dict[cfg.DISTILLER.STUDENT](pretrained=False)
+        else:
+            model_student = cifar_model_dict[cfg.DISTILLER.STUDENT][0](
+                num_classes=num_classes
+            )
+        distiller = distiller_dict[cfg.DISTILLER.TYPE](model_student)
+    # distillation
+    else:
+        print(log_msg("Loading teacher model", "INFO"))
+        if cfg.DATASET.TYPE == "imagenet":
+            model_teacher = imagenet_model_dict[cfg.DISTILLER.TEACHER](pretrained=True)
+            model_student = imagenet_model_dict[cfg.DISTILLER.STUDENT](pretrained=False)
+        else:
+            net, pretrain_model_path = cifar_model_dict[cfg.DISTILLER.TEACHER]
+            assert (
+                pretrain_model_path is not None
+            ), "no pretrain model for teacher {}".format(cfg.DISTILLER.TEACHER)
+            model_teacher = net(num_classes=num_classes)
+            assert isinstance(model_teacher, torch.nn.Module), f"{model_teacher.__class__.__name__} is not a subclass of torch.nn.Module"
+            if 'ckpt_epoch' in pretrain_model_path:
+                print('Using downloaded checkpoint; does not support data parallel')
+                model_teacher = model_teacher.cuda()
+            else:
+                print('Using trained checkpoint; supports data parallel')
+                model_teacher = torch.nn.DataParallel(model_teacher.cuda())
+            model_teacher_checkpoint = load_checkpoint(pretrain_model_path)["model"]
+            assert model_teacher_checkpoint is not None, "no pretrain model for teacher {}".format(cfg.DISTILLER.TEACHER)
+            # load the teacher model state dictionary
+            model_teacher.load_state_dict(model_teacher_checkpoint)
+            model_student = cifar_model_dict[cfg.DISTILLER.STUDENT][0](
+                num_classes=num_classes
+            )
+        if cfg.DISTILLER.TYPE == "CRD":
+            distiller = distiller_dict[cfg.DISTILLER.TYPE](
+                model_student, model_teacher, cfg, num_data
+            )
+        else:
+            distiller = distiller_dict[cfg.DISTILLER.TYPE](
+                model_student, model_teacher, cfg
+            )
+    distiller = torch.nn.DataParallel(distiller.cuda())
+
+    if cfg.DISTILLER.TYPE != "NONE":
+        print(
+            log_msg(
+                "Extra parameters of {}: {}\033[0m".format(
+                    cfg.DISTILLER.TYPE, distiller.module.get_extra_parameters()
+                ),
+                "INFO",
+            )
+        )
+    total_params = sum(p.numel() for p in distiller.parameters())
+    trainable_params = sum(p.numel() for p in distiller.parameters() if p.requires_grad)
+    print(f"🧮 Total parameters: {total_params:,}")
+    print(f"🧮 Trainable parameters: {trainable_params:,}")
+
+    torch.cuda.reset_peak_memory_stats()
+    torch.cuda.synchronize()  # make sure all GPU memory allocations are synchronized
+    mem_alloc_before = torch.cuda.memory_allocated() / 1024**2
+    mem_reserved_before = torch.cuda.memory_reserved() / 1024**2
+    # train
+    start_time = time.time()
+
+    # train
+    trainer = trainer_dict[cfg.SOLVER.TRAINER](
+        experiment_name, distiller, train_loader, val_loader, cfg
+    )
+    trainer.train(resume=resume)
+    end_time = time.time()
+    training_time = end_time - start_time
+    torch.cuda.synchronize()
+    mem_alloc_after = torch.cuda.memory_allocated() / 1024**2
+    mem_reserved_after = torch.cuda.memory_reserved() / 1024**2
+    print(f"🕒 Training time: {training_time:.2f} seconds")
+    print(f"🖥️ GPU Memory Allocated (Before → After): {mem_alloc_before:.2f} MB → {mem_alloc_after:.2f} MB")
+    print(f"🖥️ GPU Memory Reserved (Before → After): {mem_reserved_before:.2f} MB → {mem_reserved_after:.2f} MB")
+
+
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser("training for knowledge distillation.")
+    parser.add_argument("--cfg", type=str, default="")
+    parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--logit-stand", action="store_true")
+    parser.add_argument("--base-temp", type=float, default=2)
+    parser.add_argument("--kd-weight", type=float, default=9)
+    parser.add_argument("opts", default=None, nargs=argparse.REMAINDER)
+    
+
+    TT = [ 9,7,5,3,1]
+    al = [ 0.1, 0.01, 0.001, 0.0001, 0.00001]
+    for i in range(len(TT)):
+        for j in range(len(al)):
+            cfg.defrost()
+            args = parser.parse_args()
+            args.cfg = r"logit-standardization-KD\configs\cifar100\mlkd\vgg13_vgg8.yaml"
+            args.base_temp = 2
+            args.kd_weight = 9
+            args.KDATEMPERATURE = TT[i]
+            args.KDAALIGN_LAYERS = al[j]
+            args.logit_stand = True
+            cfg.merge_from_file(args.cfg)
+            cfg.merge_from_list(args.opts)
+            if args.logit_stand and cfg.DISTILLER.TYPE in ['KD','DKD','MLKD']:
+                cfg.EXPERIMENT.LOGIT_STAND = True
+                if cfg.DISTILLER.TYPE == 'KD':
+                    cfg.KD.LOSS.KD_WEIGHT = args.kd_weight
+                    cfg.KD.TEMPERATURE = args.base_temp 
+                elif cfg.DISTILLER.TYPE == 'DKD':
+                    cfg.DKD.ALPHA = cfg.DKD.ALPHA * args.kd_weight
+                    cfg.DKD.BETA = cfg.DKD.BETA * args.kd_weight
+                    cfg.DKD.T = args.base_temp
+                elif cfg.DISTILLER.TYPE == 'MLKD':
+                    cfg.KD.LOSS.KD_WEIGHT = args.kd_weight
+                    cfg.KD.TEMPERATURE = args.base_temp
+                    cfg.KDA.TEMPERATURE = args.KDATEMPERATURE
+                    cfg.KDA.ALIGN_LAYERS = args.KDAALIGN_LAYERS
+            cfg.freeze()
+            main(cfg, args.resume, args.opts)
