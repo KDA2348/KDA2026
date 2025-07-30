@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from ._base import Distiller
+from mdistiller.distillers.KDA import KDA
 
 def normalize(logit):
     mean = logit.mean(dim=-1, keepdims=True)
@@ -28,6 +29,7 @@ class KD(Distiller):
         self.ce_loss_weight = cfg.KD.LOSS.CE_WEIGHT
         self.kd_loss_weight = cfg.KD.LOSS.KD_WEIGHT
         self.logit_stand = cfg.EXPERIMENT.LOGIT_STAND 
+        self.kda = KDA(self.student, self.teacher, cfg.KDA.TEMPERATURE, cfg.KDA.ALIGN_LAYERS)
 
     def forward_train(self, image, target, **kwargs):
         logits_student, _ = self.student(image)
@@ -43,5 +45,6 @@ class KD(Distiller):
         losses_dict = {
             "loss_ce": loss_ce,
             "loss_kd": loss_kd,
+            "loss_la": loss_layer,
         }
         return logits_student, losses_dict
