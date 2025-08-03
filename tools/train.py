@@ -139,13 +139,13 @@ if __name__ == "__main__":
     parser.add_argument("opts", default=None, nargs=argparse.REMAINDER)
     
 
-    TT = [ 9,7,5,3,1]
-    al = [ 0.1, 0.01, 0.001, 0.0001, 0.00001]
+    TT = [ 9]
+    al = [ 0.1]
     for i in range(len(TT)):
         for j in range(len(al)):
             cfg.defrost()
             args = parser.parse_args()
-            args.cfg = r"logit-standardization-KD\configs\cifar100\mlkd\vgg13_vgg8.yaml"
+            #args.cfg = r"logit-standardization-KD\configs\cifar100\mlkd_kDA\vgg13_vgg8.yaml"
             args.base_temp = 2
             args.kd_weight = 9
             args.KDATEMPERATURE = TT[i]

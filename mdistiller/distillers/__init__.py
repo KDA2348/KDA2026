@@ -15,12 +15,16 @@ from .Sonly import Sonly
 from .VID import VID
 from .ReviewKD import ReviewKD
 from .DKD import DKD
-from .KDA import KDA
+from .KD_KDA import KD as KD_KDA
+from .MLKD_KDA import MLKD as MLKD_KDA
+
 
 distiller_dict = {
     "NONE": Vanilla,
     "KD": KD,
+    "KD_KDA": KD_KDA,
     "MLKD": MLKD,
+    "MLKD_KDA": MLKD_KDA,
     "AlignedMLKD": AlignedMLKD,
     "AT": AT,
     "OFD": OFD,
@@ -35,5 +39,4 @@ distiller_dict = {
     "VID": VID,
     "REVIEWKD": ReviewKD,
     "DKD": DKD,
-    "KDA": KDA,
 }
